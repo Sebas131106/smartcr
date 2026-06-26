@@ -1,0 +1,282 @@
+-- ============================================================
+--  SmartCR - Sistema de Inventario y Ventas
+--  Base de datos relacional - MySQL
+--  Universidad Internacional San Isidro Labrador
+--  Estudiante: Sebastián Alfaro Solís
+--  Curso: ISB-32 Programación Avanzada
+-- ============================================================
+
+CREATE DATABASE smartcr_db
+    CHARACTER SET utf8mb4
+    COLLATE utf8mb4_unicode_ci;
+
+USE smartcr_db;
+
+-- ============================================================
+-- TABLA: roles
+-- Controla los tipos de usuario dentro del sistema
+-- ============================================================
+CREATE TABLE roles (
+    id_rol        INT          NOT NULL AUTO_INCREMENT,
+    nombre_rol    VARCHAR(50)  NOT NULL,
+    descripcion   VARCHAR(200),
+    PRIMARY KEY (id_rol)
+);
+
+-- ============================================================
+-- TABLA: usuarios
+-- Almacena los usuarios del sistema con su rol asignado
+-- ============================================================
+CREATE TABLE usuarios (
+    id_usuario    INT           NOT NULL AUTO_INCREMENT,
+    nombre        VARCHAR(100)  NOT NULL,
+    correo        VARCHAR(150)  NOT NULL UNIQUE,
+    contrasena    VARCHAR(255)  NOT NULL,        -- Se almacenará cifrada (bcrypt)
+    id_rol        INT           NOT NULL,
+    activo        TINYINT(1)    NOT NULL DEFAULT 1,
+    fecha_creacion DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id_usuario),
+    CONSTRAINT fk_usuario_rol FOREIGN KEY (id_rol) REFERENCES roles(id_rol)
+);
+
+-- ============================================================
+-- TABLA: categorias
+-- Clasifica los productos del inventario
+-- ============================================================
+CREATE TABLE categorias (
+    id_categoria  INT           NOT NULL AUTO_INCREMENT,
+    nombre        VARCHAR(100)  NOT NULL,
+    descripcion   VARCHAR(200),
+    PRIMARY KEY (id_categoria)
+);
+
+-- ============================================================
+-- TABLA: proveedores
+-- Registra los proveedores asociados a los productos (RF6)
+-- ============================================================
+CREATE TABLE proveedores (
+    id_proveedor  INT           NOT NULL AUTO_INCREMENT,
+    nombre        VARCHAR(150)  NOT NULL,
+    telefono      VARCHAR(20),
+    correo        VARCHAR(150),
+    direccion     VARCHAR(250),
+    activo        TINYINT(1)    NOT NULL DEFAULT 1,
+    fecha_registro DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id_proveedor)
+);
+
+-- ============================================================
+-- TABLA: productos
+-- Catálogo principal de productos del supermercado (RF3)
+-- ============================================================
+CREATE TABLE productos (
+    id_producto       INT             NOT NULL AUTO_INCREMENT,
+    nombre            VARCHAR(150)    NOT NULL,
+    descripcion       VARCHAR(300),
+    precio_venta      DECIMAL(10, 2)  NOT NULL,
+    precio_compra     DECIMAL(10, 2),
+    stock_actual      INT             NOT NULL DEFAULT 0,
+    stock_minimo      INT             NOT NULL DEFAULT 5,    -- Umbral para alerta (RF8)
+    id_categoria      INT,
+    id_proveedor      INT,
+    activo            TINYINT(1)      NOT NULL DEFAULT 1,
+    fecha_registro    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id_producto),
+    CONSTRAINT fk_producto_categoria FOREIGN KEY (id_categoria) REFERENCES categorias(id_categoria),
+    CONSTRAINT fk_producto_proveedor FOREIGN KEY (id_proveedor) REFERENCES proveedores(id_proveedor)
+);
+
+-- ============================================================
+-- TABLA: ventas
+-- Encabezado de cada transacción de venta (RF5)
+-- ============================================================
+CREATE TABLE ventas (
+    id_venta      INT             NOT NULL AUTO_INCREMENT,
+    id_usuario    INT             NOT NULL,     -- Cajero que realizó la venta
+    total         DECIMAL(10, 2)  NOT NULL DEFAULT 0.00,
+    fecha_venta   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    estado        VARCHAR(20)     NOT NULL DEFAULT 'completada',  -- completada / anulada
+    PRIMARY KEY (id_venta),
+    CONSTRAINT fk_venta_usuario FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario)
+);
+
+-- ============================================================
+-- TABLA: detalle_ventas
+-- Líneas de detalle de cada venta (productos vendidos)
+-- ============================================================
+CREATE TABLE detalle_ventas (
+    id_detalle    INT             NOT NULL AUTO_INCREMENT,
+    id_venta      INT             NOT NULL,
+    id_producto   INT             NOT NULL,
+    cantidad      INT             NOT NULL,
+    precio_unitario DECIMAL(10,2) NOT NULL,
+    subtotal      DECIMAL(10, 2)  NOT NULL,
+    PRIMARY KEY (id_detalle),
+    CONSTRAINT fk_detalle_venta    FOREIGN KEY (id_venta)    REFERENCES ventas(id_venta),
+    CONSTRAINT fk_detalle_producto FOREIGN KEY (id_producto) REFERENCES productos(id_producto)
+);
+
+-- ============================================================
+-- TABLA: movimientos_inventario
+-- Historial de todos los cambios en el inventario (RF9)
+-- Registra entradas, salidas y ajustes de stock
+-- ============================================================
+CREATE TABLE movimientos_inventario (
+    id_movimiento INT           NOT NULL AUTO_INCREMENT,
+    id_producto   INT           NOT NULL,
+    id_usuario    INT           NOT NULL,
+    tipo_movimiento VARCHAR(20) NOT NULL,       -- 'entrada' | 'salida' | 'ajuste'
+    cantidad      INT           NOT NULL,
+    stock_anterior INT          NOT NULL,
+    stock_nuevo   INT           NOT NULL,
+    motivo        VARCHAR(200),
+    id_venta      INT,                          -- Referencia si el movimiento fue por una venta
+    fecha         DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id_movimiento),
+    CONSTRAINT fk_mov_producto FOREIGN KEY (id_producto) REFERENCES productos(id_producto),
+    CONSTRAINT fk_mov_usuario  FOREIGN KEY (id_usuario)  REFERENCES usuarios(id_usuario),
+    CONSTRAINT fk_mov_venta    FOREIGN KEY (id_venta)    REFERENCES ventas(id_venta)
+);
+
+-- ============================================================
+-- TABLA: alertas_inventario
+-- Registra las alertas generadas por stock bajo (RF8)
+-- ============================================================
+CREATE TABLE alertas_inventario (
+    id_alerta     INT           NOT NULL AUTO_INCREMENT,
+    id_producto   INT           NOT NULL,
+    stock_al_momento INT        NOT NULL,
+    leida         TINYINT(1)    NOT NULL DEFAULT 0,
+    fecha         DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id_alerta),
+    CONSTRAINT fk_alerta_producto FOREIGN KEY (id_producto) REFERENCES productos(id_producto)
+);
+
+-- ============================================================
+-- TRIGGER: Actualiza stock automáticamente después de una venta
+-- y registra el movimiento en el historial (RF4, RF5, RF9)
+-- ============================================================
+DELIMITER //
+
+CREATE TRIGGER trg_actualizar_stock_venta
+AFTER INSERT ON detalle_ventas
+FOR EACH ROW
+BEGIN
+    DECLARE v_stock_anterior INT;
+
+    SELECT stock_actual INTO v_stock_anterior
+    FROM productos
+    WHERE id_producto = NEW.id_producto;
+
+    UPDATE productos
+    SET stock_actual = stock_actual - NEW.cantidad
+    WHERE id_producto = NEW.id_producto;
+
+    INSERT INTO movimientos_inventario (
+        id_producto, id_usuario, tipo_movimiento,
+        cantidad, stock_anterior, stock_nuevo,
+        motivo, id_venta
+    )
+    SELECT
+        NEW.id_producto,
+        v.id_usuario,
+        'salida',
+        NEW.cantidad,
+        v_stock_anterior,
+        v_stock_anterior - NEW.cantidad,
+        'Venta registrada',
+        NEW.id_venta
+    FROM ventas v WHERE v.id_venta = NEW.id_venta;
+
+    -- Generar alerta si el stock queda bajo el mínimo (RF8)
+    IF (v_stock_anterior - NEW.cantidad) <= (SELECT stock_minimo FROM productos WHERE id_producto = NEW.id_producto) THEN
+        INSERT INTO alertas_inventario (id_producto, stock_al_momento)
+        VALUES (NEW.id_producto, v_stock_anterior - NEW.cantidad);
+    END IF;
+
+END;//
+
+DELIMITER ;
+
+-- ============================================================
+-- VISTA: productos con stock bajo (útil para dashboard y RF7)
+-- ============================================================
+CREATE VIEW vista_stock_bajo AS
+SELECT
+    p.id_producto,
+    p.nombre,
+    p.stock_actual,
+    p.stock_minimo,
+    c.nombre AS categoria
+FROM productos p
+LEFT JOIN categorias c ON p.id_categoria = c.id_categoria
+WHERE p.stock_actual <= p.stock_minimo
+  AND p.activo = 1;
+
+-- ============================================================
+-- VISTA: resumen de ventas por día (útil para dashboard y RF7)
+-- ============================================================
+CREATE VIEW vista_ventas_diarias AS
+SELECT
+    DATE(v.fecha_venta)       AS fecha,
+    COUNT(v.id_venta)         AS total_ventas,
+    SUM(v.total)              AS monto_total,
+    u.nombre                  AS cajero
+FROM ventas v
+JOIN usuarios u ON v.id_usuario = u.id_usuario
+WHERE v.estado = 'completada'
+GROUP BY DATE(v.fecha_venta), v.id_usuario;
+
+-- ============================================================
+-- VISTA: productos más vendidos (RF7)
+-- ============================================================
+CREATE VIEW vista_productos_mas_vendidos AS
+SELECT
+    p.id_producto,
+    p.nombre,
+    SUM(dv.cantidad)    AS total_vendido,
+    SUM(dv.subtotal)    AS ingreso_total
+FROM detalle_ventas dv
+JOIN productos p ON dv.id_producto = p.id_producto
+JOIN ventas v    ON dv.id_venta    = v.id_venta
+WHERE v.estado = 'completada'
+GROUP BY p.id_producto, p.nombre
+ORDER BY total_vendido DESC;
+
+-- ============================================================
+-- DATOS INICIALES (seed data)
+-- ============================================================
+
+-- Roles del sistema
+INSERT INTO roles (nombre_rol, descripcion) VALUES
+('Administrador', 'Acceso completo al sistema'),
+('Cajero',        'Acceso a ventas e inventario de consulta');
+
+-- Usuario administrador por defecto
+-- Contraseña: Admin123! (en producción se debe cifrar con bcrypt)
+INSERT INTO usuarios (nombre, correo, contrasena, id_rol) VALUES
+('Administrador SmartCR', 'admin@smartcr.com', '$2b$10$placeholderHashAqui', 1);
+
+-- Categorías base
+INSERT INTO categorias (nombre, descripcion) VALUES
+('Granos y Cereales',  'Arroz, frijoles, maíz y similares'),
+('Lácteos',            'Leche, queso, mantequilla y derivados'),
+('Bebidas',            'Jugos, refrescos, agua y bebidas en general'),
+('Limpieza',           'Productos de limpieza del hogar'),
+('Frutas y Verduras',  'Productos frescos del mercado'),
+('Panadería',          'Pan, galletas y productos de horno');
+
+-- Proveedor de ejemplo
+INSERT INTO proveedores (nombre, telefono, correo, direccion) VALUES
+('Distribuidora Nacional S.A.', '2222-3333', 'ventas@distnacional.cr', 'San José, Costa Rica');
+
+-- Productos de ejemplo
+INSERT INTO productos (nombre, precio_venta, precio_compra, stock_actual, stock_minimo, id_categoria, id_proveedor) VALUES
+('Arroz 1kg',        1200.00,  800.00, 50, 10, 1, 1),
+('Frijoles 1kg',     1500.00,  900.00, 30, 10, 1, 1),
+('Leche 1L',         1100.00,  700.00, 40,  8, 2, 1),
+('Azúcar 1kg',        900.00,  500.00, 60, 10, 1, 1),
+('Aceite 1L',        2500.00, 1800.00, 25,  5, 1, 1),
+('Agua 1.5L',         700.00,  400.00, 80, 15, 3, 1),
+('Detergente 500g',  2200.00, 1400.00, 20,  5, 4, 1),
+('Pan Blanco',        600.00,  350.00, 15,  5, 6, 1);
