@@ -1,0 +1,2 @@
+# smartcr
+Sistema de supermercado
